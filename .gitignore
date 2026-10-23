@@ -1,0 +1,6 @@
+node_modules/
+dist/
+.scratch/
+dev/panel.bundle.js
+dev/preview-shot.png
+dev/shot-*.png

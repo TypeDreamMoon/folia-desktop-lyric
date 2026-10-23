@@ -1,0 +1,23 @@
+{
+  "name": "folia-desktop-lyric",
+  "version": "0.1.0",
+  "private": true,
+  "license": "AGPL-3.0-only",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs --watch",
+    "dev:panel": "esbuild dev/panelEntry.js --bundle --format=iife --outfile=dev/panel.bundle.js --log-level=warning && electron dev/harness.cjs --panel",
+    "dev:fonts": "electron dev/harness.cjs --fonts",
+    "check:client": "node dev/clientcheck.mjs",
+    "package": "node build.mjs && node -e \"const fs=require('fs'),p=require('path');const s=p.join('dist','amll-desktop-lyric'),t='mod';fs.rmSync(t,{recursive:true,force:true});fs.cpSync(s,t,{recursive:true});console.log('mod/ 已同步')\"",
+    "validate": "node dev/validate-submission.mjs"
+  },
+  "dependencies": {
+    "@applemusic-like-lyrics/core": "^0.6.0",
+    "esbuild": "^0.28.2"
+  },
+  "devDependencies": {
+    "electron": "^43.8.3"
+  }
+}
