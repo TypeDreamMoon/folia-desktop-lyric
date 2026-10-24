@@ -255,6 +255,93 @@ try {
     problems.push(`1.6 轮询路径抛错：${error && error.message}`);
 }
 
+// Folia 0.7.22：切壁纸 / 重建主窗口时播放桥接会先被摘掉再挂回来。这期间读播放状态或歌词会
+// 抛 playback-unavailable-in-main-context；activate 和事件、定时器都不能被它带崩，桥接挂
+// 回来之后要能自己恢复推送。
+try {
+    everyListeners.length = 0;
+    let bridgeMissing = true;
+    const offlineListeners = new Map();
+    const pushed = [];
+    const unavailable = () => new Error('playback-unavailable-in-main-context');
+    const offlineFolium = {
+        ...folium,
+        host: { folia: '0.7.22', folium: { major: 1, minor: 7 } },
+        playback: {
+            getState: () => {
+                if (bridgeMissing) throw unavailable();
+                return {
+                    song: { id: '1', title: '夜航', artist: 'Harness', album: 'dev', source: 'netease', ref: 'r1' },
+                    state: 'playing',
+                    position: 3,
+                    duration: 210,
+                };
+            },
+            toggle: () => {
+                if (bridgeMissing) throw unavailable();
+                playbackCalls.push('toggle');
+            },
+            next: () => {},
+            previous: () => {},
+        },
+        lyrics: {
+            getLines: () => {
+                if (bridgeMissing) throw unavailable();
+                return lines;
+            },
+        },
+        rpc: {
+            call: async (name, payload) => {
+                if (name === 'state') pushed.push(payload);
+                return { ok: true };
+            },
+            on: () => () => {},
+        },
+        every: (ms, listener) => {
+            everyListeners.push({ ms, listener });
+            return () => {};
+        },
+        events: {
+            on: (type, handler) => {
+                if (!offlineListeners.has(type)) offlineListeners.set(type, new Set());
+                offlineListeners.get(type).add(handler);
+                return () => offlineListeners.get(type)?.delete(handler);
+            },
+        },
+    };
+
+    const dispose = activate(offlineFolium);
+    check(pushed.length === 0, '播放桥接不可用时不应推送空状态');
+
+    // 事件回调也不能抛（换歌、状态变化、主题变化都会在桥接不在时照常触发）。
+    const emitOffline = (type, payload) => {
+        for (const handler of offlineListeners.get(type) || []) handler(payload);
+    };
+    emitOffline('lyrics.loaded', { song: null, lines });
+    emitOffline('playback.songChanged', { song: null });
+    emitOffline('playback.stateChanged', { state: 'paused' });
+    emitOffline('playback.seeked', { position: 4 });
+    emitOffline('theme.changed', { theme: { primaryColor: '#fff', backgroundColor: '#000', fontStyle: 'sans' } });
+    check(pushed.length === 0, '播放桥接不可用时事件也不该把空状态推出去');
+
+    const tick = everyListeners.find((entry) => entry.ms === 200);
+    check(Boolean(tick), '应当注册 200ms 的状态推送');
+    if (tick) tick.listener();
+    check(pushed.length === 0, '播放桥接不可用时定时器也不该推送');
+
+    // 桥接挂回来：下一拍就要补一帧完整状态（含歌词），不用等用户点同步。
+    bridgeMissing = false;
+    if (tick) tick.listener();
+    check(pushed.length > 0, '播放桥接挂回来后应当恢复推送');
+    const last = pushed[pushed.length - 1];
+    check(last && last.title === '夜航', '恢复后的快照要带当前歌曲');
+    check(last && Array.isArray(last.lines) && last.lines.length === 1, '恢复后的快照要带歌词（激活时没读到，要补读）');
+
+    if (typeof dispose === 'function') dispose();
+} catch (error) {
+    problems.push(`播放桥接不可用路径抛错：${error && error.message}`);
+}
+
 await new Promise((resolve) => setTimeout(resolve, 50));
 
 console.log('[clientcheck] 设置分区:', sections.map((entry) => `${entry.def.id}(${entry.def.settings.length} 项)`).join(', '));

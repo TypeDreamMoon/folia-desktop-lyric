@@ -11,6 +11,11 @@ const HEARTBEAT_MS = 3000;
 
 const LABEL = { 'zh-CN': '桌面歌词', en: 'Desktop lyrics', 'zh-TW': '桌面歌詞' };
 
+// Folia 0.7.22 起，切换壁纸 / 重建主窗口会先把播放桥接摘掉再挂回来。这期间读播放状态或歌词
+// 会抛这个错误码；它不是故障，等下一拍重试就行，别让它冒出 activate。
+const BRIDGE_UNAVAILABLE = 'playback-unavailable-in-main-context';
+const isBridgeUnavailable = (error) => Boolean(error) && error.message === BRIDGE_UNAVAILABLE;
+
 // src/fontPanel.mjs
 // 设置面板里的字体选择器：四行（主字体 / 西文字体 / 中文字体 / 回退字体），点「选择」展开
 // 可搜索的本机字体列表，列表由 main 入口扫字体目录给出。值仍然存在设置 schema 里（text 字段），
@@ -345,6 +350,10 @@ export const createFontPanel = (options) => (container, ctx) => {
 };
 
 export default function activate(folium) {
+    // 导出等非主上下文没有播放、歌词和 RPC 服务，注册了也用不上；宿主会把 activate 里的
+    // 异常直接记成「client activate: ...」，所以这里整套都跳过。
+    if (folium.env && folium.env.context && folium.env.context !== 'main') return () => {};
+
     // main 入口没加载（或模组只装了 client）时 rpc 会一直 reject，这里吞掉并只记一次。
     let rpcBroken = false;
     const call = (name, payload) => {
@@ -952,12 +961,16 @@ export default function activate(folium) {
     };
 
     const refreshLines = () => {
+        let next;
         try {
-            setLines(folium.lyrics.getLines() || []);
+            next = folium.lyrics.getLines() || [];
         } catch (error) {
+            // 桥接被摘掉时歌词也一起没了：保留窗口现有的行，别一读不到就清空。
+            if (isBridgeUnavailable(error)) return;
             folium.log.warn('[desktop-lyric] 读取歌词失败', error);
-            setLines([]);
+            next = [];
         }
+        setLines(next);
     };
 
     // ---------------------------------------------------------------- 快照推送
@@ -966,8 +979,19 @@ export default function activate(folium) {
     // 纯属浪费 IPC 和结构化克隆。
     let deliveredLinesVersion = -1;
 
+    // 桥接还没挂好时返回 null：这一帧不发，等它挂回来再补。
+    const readPlayback = () => {
+        try {
+            return folium.playback.getState();
+        } catch (error) {
+            if (!isBridgeUnavailable(error)) throw error;
+            return null;
+        }
+    };
+
     const snapshot = (withLines) => {
-        const playback = folium.playback.getState();
+        const playback = readPlayback();
+        if (!playback) return null;
         const song = playback.song;
         const sendLines = withLines || linesVersion !== deliveredLinesVersion;
         if (sendLines) deliveredLinesVersion = linesVersion;
@@ -995,9 +1019,26 @@ export default function activate(folium) {
     let lastState = '';
     let lastLinesVersion = -1;
     let lastSentAt = 0;
+    let playbackReady = false;
 
     const pushState = (force = false, withLines = false) => {
-        const payload = snapshot(withLines);
+        let payload;
+        try {
+            payload = snapshot(withLines);
+        } catch (error) {
+            // 快照出问题不能从定时器或事件回调里冒出去：记一行，下一拍再试。
+            folium.log.warn('[desktop-lyric] 生成快照失败，跳过这一帧', error);
+            return;
+        }
+        if (!payload) {
+            if (playbackReady) folium.log.warn('[desktop-lyric] 播放桥接暂不可用，等它挂回来再推送');
+            playbackReady = false;
+            return;
+        }
+        // 桥接刚挂回来：不管有没有变化都先补一帧，否则窗口会一直停在旧状态。
+        const recovered = !playbackReady;
+        playbackReady = true;
+
         const now = Date.now();
         const unchanged =
             !force &&
@@ -1006,7 +1047,7 @@ export default function activate(folium) {
             (payload.state !== 'playing' ||
                 Math.abs(payload.position - (lastPosition + (now - lastAt) / 1000)) * 1000 < DRIFT_TOLERANCE_MS);
 
-        if (unchanged && now - lastSentAt < HEARTBEAT_MS) return;
+        if (!recovered && unchanged && now - lastSentAt < HEARTBEAT_MS) return;
 
         lastPosition = payload.position;
         lastAt = now;
@@ -1028,7 +1069,9 @@ export default function activate(folium) {
             folium.playback[method]();
             folium.log.info(`[desktop-lyric] playback.${method}()`);
         } catch (error) {
-            folium.log.error(`[desktop-lyric] playback.${method}() 失败`, error);
+            // 桥接没挂好不是「控制失败」，别在日志里报成错误。
+            if (isBridgeUnavailable(error)) folium.log.info('[desktop-lyric] 播放桥接暂不可用，忽略这次控制');
+            else folium.log.error(`[desktop-lyric] playback.${method}() 失败`, error);
         }
         // 命令生效后位置/状态都会变，立刻补一帧给窗口。
         pushState(true);
@@ -1153,7 +1196,12 @@ export default function activate(folium) {
     pushSettings();
     pushState(true);
 
-    const timer = folium.every(TICK_MS, () => pushState(false));
+    const timer = folium.every(TICK_MS, () => {
+        // 桥接没挂好、手里又还没有歌词时重读一次：挂回来的那一帧就能带上行，
+        // 不用等下一次 lyrics.loaded。已经有词就不重复序列化。
+        if (!playbackReady && lines.length === 0) refreshLines();
+        pushState(false);
+    });
 
     return () => {
         timer();

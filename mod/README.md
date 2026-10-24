@@ -22,13 +22,13 @@ Folia 托盘里那一项只是把**主窗口**变成透明置顶 + 鼠标穿透�
 
 ```bash
 npm install
-npm run build       # 产出 dist/desktop-lyric/
+npm run build       # 产出 dist/amll-desktop-lyric/
 ```
 
-把 `dist/desktop-lyric/` 整个文件夹拷到 Folia 的用户模组目录（模组面板右上角「打开模组目录」，
-打包版是 `%APPDATA%\Folia\mods`），或者把 `dist/desktop-lyric` 打成 zip 拖进模组面板。
+把 `dist/amll-desktop-lyric/` 整个文件夹拷到 Folia 的用户模组目录（模组面板右上角「打开模组目录」，
+打包版是 `%APPDATA%\Folia\mods`），或者把 `dist/amll-desktop-lyric` 打成 zip 拖进模组面板。
 
-然后在「设置 → 模组」：打开「模组系统」→「重载」→ 启用 `desktop-lyric`（会弹一次确认，
+然后在「设置 → 模组」：打开「模组系统」→「重载」→ 启用 `amll-desktop-lyric`（会弹一次确认，
 自己写的模组没有签名，这是正常的）。之后用命令面板的「桌面歌词：开关」开窗。
 
 ## 设置（设置 → 模组 → 桌面歌词）
@@ -162,6 +162,9 @@ folium.playback.toggle()  ←─ rpc.on('cmd') ←─ IPC ←─ 控制条点击
   只能用「桌面歌词：锁定 / 解锁」命令。
 - 窗口按钮的命令有两条路：Folium 1.7 用 `api.rpc.send` 推送（即时）；1.6 没有这个通道，
   改成 main 排队 + client 每 150ms 来取（最多慢 150ms，功能一样）。Folia 0.7.21 及更早就是 1.6。
+- Folia 0.7.22 切换壁纸 / 重建主窗口时会把播放桥接先摘掉再挂回来，这期间读状态会抛
+  `playback-unavailable-in-main-context`。模组把它当成「暂时读不到」：不推送空状态、不动歌词，
+  等下一拍读到再补一帧，所以不会再在模组日志里留下 `client activate: ...` 的报错。
 - 底色只能是纯色 + 透明度：透明窗口拿不到桌面画面，所以做不了真正的毛玻璃（Windows 亚克力要用
   `SetWindowCompositionAttribute` 之类的系统接口，模组碰不到）。
 - 拖动是模组自己实现的（app-region 拖动会吃掉指针事件，hover 和穿透就不好使了）；窗口边缘的
