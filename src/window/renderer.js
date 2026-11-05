@@ -101,6 +101,12 @@ let themeFontStack = '';
 let lastPayload = null;
 // 换歌后「歌词加载中」的窗口期，过了才显示「纯音乐」。
 let loadingSince = 0;
+// 这些是「每 200ms 都会来一次」的 DOM 写入，值没变就别碰 DOM。
+let lastSongText = '';
+let lastPlayIcon = null;
+let placeholderText = '';
+let noLyricsClass = false;
+let lockRect = null;
 
 const currentMs = () => Math.max(0, Math.round(playing ? baseMs + (performance.now() - baseAt) : baseMs));
 
@@ -133,27 +139,29 @@ const applyLines = () => {
     player.update();
     player.calcLayout(LayoutReason.ConfigChange);
     updatePlaceholder();
+    wake(playing ? 0 : 500);
 };
 
 // ---------------------------------------------------------------- 占位文案
 
 const updatePlaceholder = () => {
-    body.classList.toggle('no-lyrics', settings.hideWithoutLyrics && rawLines.length === 0);
-    if (rawLines.length > 0) {
-        placeholderEl.hidden = true;
-        return;
+    const noLyrics = settings.hideWithoutLyrics && rawLines.length === 0;
+    if (noLyrics !== noLyricsClass) {
+        noLyricsClass = noLyrics;
+        body.classList.toggle('no-lyrics', noLyrics);
     }
-    placeholderEl.hidden = false;
+    const hidden = rawLines.length > 0;
+    if (placeholderEl.hidden !== hidden) placeholderEl.hidden = hidden;
+    if (hidden) return;
     const payload = lastPayload;
-    if (!payload) {
-        placeholderEl.textContent = '正在连接 Folia…';
-        return;
+    let text;
+    if (!payload) text = '正在连接 Folia…';
+    else if (!payload.title) text = '未在播放';
+    else text = Date.now() - loadingSince < 4000 ? '歌词加载中…' : '纯音乐，请欣赏';
+    if (text !== placeholderText) {
+        placeholderText = text;
+        placeholderEl.textContent = text;
     }
-    if (!payload.title) {
-        placeholderEl.textContent = '未在播放';
-        return;
-    }
-    placeholderEl.textContent = Date.now() - loadingSince < 4000 ? '歌词加载中…' : '纯音乐，请欣赏';
 };
 
 // ---------------------------------------------------------------- 设置
@@ -193,7 +201,7 @@ const applyOpacity = () => {
     appEl.style.opacity = String(target);
 };
 
-const applySettings = () => {
+const applySettings = (layoutChanged = true) => {
     const root = document.documentElement.style;
     root.setProperty('--dl-bg', resolveBackground());
     // 「左右交替」靠对唱标记实现，容器本身靠左，非对唱行才不会被居中。
@@ -222,20 +230,6 @@ const applySettings = () => {
     body.classList.toggle('mode-single', settings.mode === 'single');
     body.classList.toggle('mode-double', settings.mode === 'double');
     body.classList.toggle('mode-board', settings.mode === 'board');
-    player.setHidePassedLines(settings.hidePassedLines || settings.mode !== 'board');
-    // 带式形态里纵向位置挪的是整条带（CSS 的 --dl-vp），带内始终居中；歌词板形态直接交给 AMLL。
-    player.setAlignPosition(settings.mode === 'board' ? settings.verticalPosition : 0.5);
-    player.setWordFadeWidth(settings.wordFadeWidth);
-    player.setEnableSpring(settings.enableSpring);
-    // AMLL 的弹簧参数：mass / stiffness / damping，位置和缩放两套都吃这一份。
-    const spring = {
-        mass: settings.springMass,
-        stiffness: settings.springStiffness,
-        damping: settings.springDamping,
-    };
-    player.setLinePosYSpringParams(spring);
-    player.setLineScaleSpringParams(spring);
-    player.setEnableBlur(settings.blurUpcoming);
     root.setProperty('--dl-sub-opacity', String(settings.translationOpacity));
     root.setProperty('--dl-tracking', `${settings.letterSpacing}em`);
     body.classList.toggle('locked', settings.lock || settings.ignoreHover);
@@ -246,10 +240,30 @@ const applySettings = () => {
     body.classList.toggle('header-hover', settings.headerMode === 'hover');
     body.classList.toggle('header-always', settings.headerMode === 'always');
     body.classList.toggle('header-never', settings.headerMode === 'never');
-    body.classList.toggle('no-lyrics', settings.hideWithoutLyrics && rawLines.length === 0);
     setIcon(lockEl, settings.lock ? ICON_LOCKED : ICON_UNLOCKED);
     lockEl.classList.toggle('unlocked', !settings.lock);
-    player.calcLayout(LayoutReason.ConfigChange);
+    // 控制条显隐 / 布局变化后，锁定按钮的位置可能变了。
+    lockRect = null;
+    if (layoutChanged) {
+        // 这些是 AMLL 的排版相关设置；只改颜色 / 透明度时不用碰它们。
+        player.setHidePassedLines(settings.hidePassedLines || settings.mode !== 'board');
+        // 带式形态里纵向位置挪的是整条带（CSS 的 --dl-vp），带内始终居中；歌词板形态直接交给 AMLL。
+        player.setAlignPosition(settings.mode === 'board' ? settings.verticalPosition : 0.5);
+        player.setWordFadeWidth(settings.wordFadeWidth);
+        player.setEnableSpring(settings.enableSpring);
+        // AMLL 的弹簧参数：mass / stiffness / damping，位置和缩放两套都吃这一份。
+        const spring = {
+            mass: settings.springMass,
+            stiffness: settings.springStiffness,
+            damping: settings.springDamping,
+        };
+        player.setLinePosYSpringParams(spring);
+        player.setLineScaleSpringParams(spring);
+        player.setEnableBlur(settings.blurUpcoming);
+        player.calcLayout(LayoutReason.ConfigChange);
+        wake(playing ? 0 : 450);
+    }
+    updatePlaceholder();
 };
 
 // ---------------------------------------------------------------- 快照
@@ -258,29 +272,43 @@ bridge.onState((payload) => {
     if (!payload || typeof payload !== 'object') return;
     lastPayload = payload;
 
-    baseMs = Math.round((Number(payload.position) || 0) * 1000);
+    const nextBaseMs = Math.round((Number(payload.position) || 0) * 1000);
+    const moved = Math.abs(nextBaseMs - baseMs) > 60;
+    baseMs = nextBaseMs;
     baseAt = performance.now();
 
     const wasPlaying = playing;
     playing = payload.state === 'playing';
     if (playing !== wasPlaying) {
-        if (playing) player.resume();
-        else player.pause();
+        if (playing) {
+            player.resume();
+            player.setCurrentTime(currentMs());
+        } else {
+            player.pause();
+        }
         applyOpacity();
     }
 
-    songEl.textContent = [payload.title, payload.artist].filter(Boolean).join(' — ');
-    setIcon(playPauseEl, playing ? ICON_PAUSE : ICON_PLAY);
+    const songText = [payload.title, payload.artist].filter(Boolean).join(' — ');
+    if (songText !== lastSongText) {
+        lastSongText = songText;
+        songEl.textContent = songText;
+    }
+    if (lastPlayIcon !== playing) {
+        lastPlayIcon = playing;
+        setIcon(playPauseEl, playing ? ICON_PAUSE : ICON_PLAY);
+    }
 
     if (payload.theme) {
         const nextColor = typeof payload.theme.color === 'string' ? payload.theme.color : themeColor;
         const nextBackground = typeof payload.theme.background === 'string' ? payload.theme.background : themeBackground;
         const nextFontStack = typeof payload.theme.fontStack === 'string' ? payload.theme.fontStack : themeFontStack;
         if (nextColor !== themeColor || nextBackground !== themeBackground || nextFontStack !== themeFontStack) {
+            const fontChanged = nextFontStack !== themeFontStack;
             themeColor = nextColor;
             themeBackground = nextBackground;
             themeFontStack = nextFontStack;
-            applySettings();
+            applySettings(fontChanged);
         }
     }
 
@@ -298,33 +326,102 @@ bridge.onState((payload) => {
     }
 
     updatePlaceholder();
+    // 暂停时只有真的换了位置 / 播放状态才唤醒一帧，别让 200ms 的状态推送把 rAF 一直点亮。
+    if (playing !== wasPlaying || moved) wake(playing ? 0 : 700);
 });
+
+// 会影响 AMLL 排版的字段。只改颜色 / 透明度时不用重算，滑杆拖动会省很多。
+const LAYOUT_KEYS = [
+    'mode',
+    'fontSize',
+    'fontWeight',
+    'letterSpacing',
+    'align',
+    'verticalPosition',
+    'translationScale',
+    'wordFadeWidth',
+    'enableSpring',
+    'blurUpcoming',
+    'hidePassedLines',
+    'springMass',
+    'springStiffness',
+    'springDamping',
+    'showTranslation',
+    'showRomanization',
+    'fontFamily',
+    'fontLatin',
+    'fontCjk',
+    'fontFallback',
+];
 
 bridge.onSettings((next) => {
     if (!next || typeof next !== 'object') return;
+    const previous = settings;
     const relayout =
-        settings.showTranslation !== next.showTranslation || settings.showRomanization !== next.showRomanization;
+        previous.showTranslation !== next.showTranslation || previous.showRomanization !== next.showRomanization;
     settings = { ...settings, ...next };
-    applySettings();
+    const layoutChanged = LAYOUT_KEYS.some((key) => previous[key] !== settings[key]);
+    applySettings(layoutChanged);
     // 只有翻译 / 音译开关变了才需要重铺歌词，否则切个锁定也会把歌词滚回去。
     if (relayout) applyLines();
 });
 
 // ---------------------------------------------------------------- 逐帧推进
 
-let lastFrame = -1;
-const frame = (now) => {
-    if (lastFrame < 0) lastFrame = now;
-    // 标签页被系统挂起过的话 delta 会很大，夹一下免得弹簧算法炸掉。
-    const delta = Math.min(now - lastFrame, 250);
-    lastFrame = now;
-    if (rawLines.length > 0) {
-        player.setCurrentTime(currentMs());
-        player.update(delta);
+// 只在「正在播放」或「刚改过设置，弹簧还在回位」时跑 rAF；暂停、无歌词、窗口隐藏时彻底停掉。
+// 之前是永远 requestAnimationFrame + backgroundThrottling:false，桌面歌词挂着不动也在烧 CPU。
+let rafId = 0;
+let lastFrame = 0;
+let settleUntil = 0;
+let pageHidden = document.visibilityState === 'hidden';
+
+const shouldRun = (now) =>
+    !pageHidden && rawLines.length > 0 && (playing || now < settleUntil);
+
+const tick = (now) => {
+    rafId = 0;
+    if (!shouldRun(now)) {
+        lastFrame = 0;
+        return;
     }
-    requestAnimationFrame(frame);
+    // 标签页被系统挂起过的话 delta 会很大，夹一下免得弹簧算法炸掉。
+    const delta = lastFrame ? Math.min(now - lastFrame, 250) : 16;
+    lastFrame = now;
+    player.setCurrentTime(currentMs());
+    player.update(delta);
+    rafId = requestAnimationFrame(tick);
 };
-requestAnimationFrame(frame);
+
+const wake = (settleMs = 0) => {
+    if (settleMs > 0) settleUntil = Math.max(settleUntil, performance.now() + settleMs);
+    if (pageHidden || rawLines.length === 0) return;
+    if (!rafId) {
+        lastFrame = 0;
+        rafId = requestAnimationFrame(tick);
+    }
+};
+
+const sleep = () => {
+    if (rafId) cancelAnimationFrame(rafId);
+    rafId = 0;
+    lastFrame = 0;
+};
+
+document.addEventListener('visibilitychange', () => {
+    pageHidden = document.visibilityState === 'hidden';
+    if (pageHidden) {
+        sleep();
+        return;
+    }
+    if (rawLines.length > 0) {
+        player.setCurrentTime(currentMs(), true);
+        wake(playing ? 0 : 600);
+    }
+});
+
+window.addEventListener('resize', () => {
+    lockRect = null;
+});
 
 // ---------------------------------------------------------------- 交互
 
@@ -343,6 +440,9 @@ const setHover = (over) => {
 
 const bumpHover = () => {
     setHover(true);
+    const now = performance.now();
+    if (now - lastBumpAt < 120) return;
+    lastBumpAt = now;
     if (hideTimer) clearTimeout(hideTimer);
     hideTimer = setTimeout(() => {
         hideTimer = null;
@@ -350,19 +450,24 @@ const bumpHover = () => {
     }, 1200);
 };
 
+let lastBumpAt = 0;
+
 // 锁定时整窗穿透，只有指针压在锁定按钮上才解冻，好让人能用鼠标解锁。
 let overLockButton = false;
 const updateLockHit = (x, y) => {
-    if (settings.ignoreHover || settings.headerMode === 'never') {
+    if (!settings.lock || settings.ignoreHover || settings.headerMode === 'never') {
         if (!overLockButton) return;
         overLockButton = false;
         tell({ type: 'hit', onLock: false });
         return;
     }
-    const rect = lockEl.getBoundingClientRect();
+    if (!lockRect) lockRect = lockEl.getBoundingClientRect();
     const pad = 6;
     const inside =
-        x >= rect.left - pad && x <= rect.right + pad && y >= rect.top - pad && y <= rect.bottom + pad;
+        x >= lockRect.left - pad &&
+        x <= lockRect.right + pad &&
+        y >= lockRect.top - pad &&
+        y <= lockRect.bottom + pad;
     if (inside === overLockButton) return;
     overLockButton = inside;
     tell({ type: 'hit', onLock: inside });

@@ -10,7 +10,7 @@
 //   npx electron dev/harness.cjs --lockprobe       穿透 / 锁定位置 / 忽略鼠标
 //   npx electron dev/harness.cjs --cmdprobe        窗口按钮 → main → client 的命令链路
 //   npx electron dev/harness.cjs --fonts           字体枚举 rpc
-//   npx electron dev/harness.cjs --panel           字体选择器截图（独立窗口）
+//   npx electron dev/harness.cjs --panel           设置面板 + 字体选择器截图（独立窗口）
 //
 // 环境变量：FOLIUM_MINOR / LOCK / LOCKPOS / IGNOREHOVER / HEADER_MODE / ALIGN / VP / WEIGHT /
 // TRAN / FADE / SUBOP / TRACK / ROMA / FONTSIZE / FONTFAMILY / FONTLATIN / FONTCJK /
@@ -22,7 +22,7 @@
 const path = require('path');
 const nodeFs = require('node:fs');
 const os = require('node:os');
-const { app, BrowserWindow } = require('electron');
+const { app, BrowserWindow, nativeImage } = require('electron');
 
 let activate;
 try {
@@ -38,6 +38,9 @@ const env = (name, fallback) => process.env[name] || fallback;
 const num = (name, fallback) => Number(process.env[name] || fallback);
 
 const mode = has('board') || has('multi') ? 'board' : has('double') ? 'double' : 'single';
+
+// 面板截图在部分机器上会被 GPU 合成器卡住（capturePage 抛 UnknownVizError）；走软件合成稳定些。
+if (has('--panel')) app.disableHardwareAcceleration();
 
 const store = {};
 const handlers = {};
@@ -174,7 +177,18 @@ const settingsPayload = () => ({
 // ---------------------------------------------------------------- 启动
 
 const shoot = async (win, name) => {
-    const image = await win.webContents.capturePage();
+    let image;
+    try {
+        image = await win.webContents.capturePage();
+    } catch (error) {
+        // 部分机器 / 驱动上 capturePage 会抛 UnknownVizError；用 CDP 只截这扇窗的内容。
+        console.warn('[harness] capturePage 失败，改用 CDP 截图：', error.message);
+        const dbg = win.webContents.debugger;
+        if (!dbg.isAttached()) dbg.attach('1.3');
+        await dbg.sendCommand('Page.enable');
+        const shot = await dbg.sendCommand('Page.captureScreenshot', { format: 'png', fromSurface: true });
+        image = nativeImage.createFromBuffer(Buffer.from(shot.data, 'base64'));
+    }
     const file = path.join(__dirname, name);
     nodeFs.writeFileSync(file, image.toPNG());
     console.log('[harness]', file, image.getSize());
@@ -231,16 +245,27 @@ app.whenReady().then(async () => {
 
     // 字体选择器单独一扇窗，不需要歌词窗。
     if (has('--panel')) {
-        const panelWin = new BrowserWindow({ width: 720, height: 620, show: true });
+        const panelWin = new BrowserWindow({ width: 780, height: 980, show: true, backgroundColor: '#16161c' });
         await panelWin.loadFile(path.join(__dirname, 'panel.html'));
         setTimeout(async () => {
-            await fire(panelWin, `(() => {
-                const button = document.querySelectorAll('.dlf-btn')[0];
-                if (button) button.click();
-                return Boolean(button);
-            })()`);
-            await new Promise((resolve) => setTimeout(resolve, 500));
-            await shoot(panelWin, 'shot-panel.png');
+            try {
+                await shoot(panelWin, 'shot-settings.png');
+                await fire(panelWin, `(() => {
+                    const app = document.getElementById('app');
+                    if (app) app.scrollIntoView({ block: 'start' });
+                })()`);
+                await new Promise((resolve) => setTimeout(resolve, 300));
+                await fire(panelWin, `(() => {
+                    const button = document.querySelectorAll('.dlf-btn')[0];
+                    if (button) button.click();
+                    return Boolean(button);
+                })()`);
+                await new Promise((resolve) => setTimeout(resolve, 700));
+                // 只截这扇面板窗，不抓整个屏幕。
+                await shoot(panelWin, 'shot-panel.png');
+            } catch (error) {
+                console.error('[panel] 截图失败', error);
+            }
             app.exit(0);
         }, 1600);
         setTimeout(() => {

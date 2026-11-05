@@ -15,7 +15,7 @@
 | --- | --- |
 | 模组 id / Mod id | `amll-desktop-lyric` |
 | 源码仓库 / Source repository | `https://github.com/TypeDreamMoon/folia-desktop-lyric` ← **改成你自己的仓库地址** |
-| 版本 / Version (tag or commit) | `v0.1.0` |
+| 版本 / Version (tag or commit) | `v0.1.1` |
 | 模组目录 / Mod directory | `mod` |
 | 发布渠道 / Channel | **先行测试 / Beta**（建议；见下面说明） |
 | 许可证 / License | `AGPL-3.0-only` |
@@ -73,8 +73,8 @@ mod.json 声明了两个 permission，没有 embedOrigins，也没有 experiment
    ```bash
    git remote add origin https://github.com/<你>/folia-desktop-lyric.git
    git push -u origin main
-   git tag v0.1.0
-   git push origin v0.1.0
+   git tag v0.1.1
+   git push origin v0.1.1
    ```
 
 2. **在 Folia 里跑一次并截图**。模组已经装在
